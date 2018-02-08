@@ -26,6 +26,19 @@ const PKG = {
 }
 let RAW_LOCKFILE
 let SERVER
+let TREE
+
+function scrubFrom (tree) {
+  // npm ci and npm i write different `from` fields for dependency deps. This
+  // is fine any ok, but it messes with `t.deepEqual` comparisons.
+  function _scrubFrom (deps) {
+    Object.keys(deps).forEach((k) => {
+      deps[k].from = ''
+      if (deps[k].dependencies) { _scrubFrom(deps[k].dependencies) }
+    })
+  }
+  tree.dependencies && _scrubFrom(tree.dependencies)
+}
 
 test('setup', () => {
   const fixture = new Tacks(Dir({
@@ -37,7 +50,6 @@ test('setup', () => {
     SERVER = server
     return common.npm([
       'install',
-      '--package-lock-only',
       '--registry', common.registry
     ], EXEC_OPTS)
     .then(() => fs.readFileAsync(
@@ -46,6 +58,10 @@ test('setup', () => {
     )
     .then((lock) => {
       RAW_LOCKFILE = lock
+    })
+    .then(() => common.npm(['ls', '--json'], EXEC_OPTS))
+    .then((ret) => {
+      TREE = scrubFrom(JSON.parse(ret[1]))
     })
   })
 })
@@ -113,18 +129,7 @@ test('basic installation', (t) => {
   .then((ret) => {
     const lsResult = JSON.parse(ret[1])
     t.equal(ret[0], 0, 'ls exited successfully')
-    return rimraf(path.join(testDir, 'node_modules'))
-    .then(() => common.npm([
-      'install',
-      '--registry', common.registry,
-      '--loglevel', 'warn'
-    ], EXEC_OPTS))
-    .then(() => common.npm(['ls', '--json'], EXEC_OPTS))
-    .then((ret) => t.deepEqual(
-      JSON.parse(ret[1]),
-      lsResult,
-      'npm install and npm ci install identical trees'
-    ))
+    t.deepEqual(scrubFrom(lsResult), TREE, 'tree matches one from `install`')
   })
 })
 
@@ -151,44 +156,26 @@ test('supports npm-shrinkwrap.json as well', (t) => {
       /^added 6 packages in \d+(?:\.\d+)?s$/,
       'no warnings on stderr, and final output has right number of packages'
     )
-    return fs.readdirAsync(path.join(testDir, 'node_modules'))
   })
-  .then((modules) => {
-    t.deepEqual(modules.sort(), [
-      'async', 'checker', 'clean', 'minimist', 'optimist', 'wordwrap'
-    ], 'packages installed')
-    return BB.all(modules.map((mod) => {
-      return fs.readFileAsync(
-        path.join(testDir, 'node_modules', mod, 'package.json')
-      )
-      .then((f) => JSON.parse(f))
-      .then((pkgjson) => {
-        t.equal(pkgjson.name, mod, `${mod} package name correct`)
-        t.match(
-          pkgjson._integrity,
-          /sha\d+-[a-z0-9=+/]+$/i,
-          `${mod} pkgjson has _integrity`
-        )
-        t.match(
-          pkgjson._resolved,
-          new RegExp(`http.*/-/${mod}-${pkgjson.version}.tgz`),
-          `${mod} pkgjson has correct _resolved`
-        )
-        t.match(
-          pkgjson._from,
-          new RegExp(`${mod}@.*`),
-          `${mod} pkgjson has _from field`
-        )
-      })
-    }))
+  .then(() => common.npm(['ls', '--json'], EXEC_OPTS))
+  .then((ret) => {
+    t.equal(ret[0], 0, 'ls exited successfully')
+    t.deepEqual(
+      scrubFrom(JSON.parse(ret[1])),
+      TREE,
+      'tree matches one from `install`'
+    )
   })
-  .then(() => common.npm(['ls'], EXEC_OPTS))
-  .then((ret) => t.equal(ret[0], 0, 'ls exited successfully'))
   .then(() => fs.readFileAsync(
     path.join(testDir, 'npm-shrinkwrap.json'),
     'utf8')
   )
   .then((lock) => t.equal(lock, RAW_LOCKFILE, 'npm-shrinkwrap.json unchanged'))
+  .then(() => fs.readdirAsync(path.join(testDir)))
+  .then((files) => t.notOk(
+    files.some((f) => f === 'package-lock.json'),
+    'no package-lock.json created'
+  ))
 })
 
 test('removes existing node_modules/ before installing', (t) => {
@@ -235,7 +222,7 @@ test('removes existing node_modules/ before installing', (t) => {
   .then((lock) => t.equal(lock, RAW_LOCKFILE, 'package-lock.json unchanged'))
 })
 
-test('installs `directory` deps as symlinks')
+test('installs all package types correctly')
 
 test('errors if package-lock.json missing', (t) => {
   const fixture = new Tacks(Dir({
